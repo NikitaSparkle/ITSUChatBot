@@ -6,6 +6,7 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
 import pickle
 from datetime import datetime, timezone
+import asyncio
 
 from telegram import Update, Bot
 from telegram.constants import ParseMode
@@ -22,16 +23,15 @@ BOT_TOKEN = tg_bot_token
 
 # MongoDB налаштування
 client = MongoClient(MONGO_URI)
-db = client["ITSUChatBot"]  # Ім'я бази даних
-logs_collection = db["logs"]  # Колекція logs
+db = client["ITSUChatBot"]
+logs_collection = db["logs"]
 
 # Google Docs API налаштування
 SCOPES = ['https://www.googleapis.com/auth/documents.readonly']
-GOOGLE_DOC_ID = GOOGLE_DOC_ID  # Замініть на ваш Google Doc ID
+GOOGLE_DOC_ID = GOOGLE_DOC_ID
 
 
 def get_google_doc_content(doc_id):
-    """Зчитує текст із Google Docs."""
     creds = None
     if os.path.exists('token.pickle'):
         with open('token.pickle', 'rb') as token:
@@ -63,7 +63,6 @@ def get_google_doc_content(doc_id):
 txt_content = get_google_doc_content(GOOGLE_DOC_ID)
 
 
-# Визначення мови відповіді
 def detect_response_language(user_message: str) -> str:
     if re.search(r"[а-яіїєґ]", user_message.lower()):  # Кирилиця
         return "uk"  # Українська
@@ -71,32 +70,71 @@ def detect_response_language(user_message: str) -> str:
 
 
 def format_markdown_v2(reply: str) -> str:
-    """
-    Форматує текст для Telegram Markdown v2, замінюючи ** на *, а також екранує спеціальні символи.
-    """
-    # Екранування спеціальних символів Telegram Markdown v2
     special_characters = r"_*[]()~`>#+-=|{}.!"
     for char in special_characters:
         reply = reply.replace(char, f"\\{char}")
-
-    # Заміна `**текст**` на `*текст*` для жирного тексту в Telegram
     reply = re.sub(r"\*\*(.+?)\*\*", r"*\1*", reply)
-
-    # Заміна неправильного форматування, наприклад, подвійних пробілів після заміни
-    reply = reply.replace(" *", " *").replace("* ", "* ").strip()
-
     return reply
 
 
-# Функція для запису логів у базу даних
-def log_to_db(user_name, user_question, ai_answer):
+async def log_to_db(user_name, user_question, ai_answer):
     log_entry = {
         "user_name": user_name,
         "user_question": user_question,
         "ai_answer": ai_answer,
-        "datetime": datetime.now(timezone.utc)  # Використовуємо timezone-aware datetime
+        "datetime": datetime.now(timezone.utc)
     }
-    logs_collection.insert_one(log_entry)
+    await asyncio.to_thread(logs_collection.insert_one, log_entry)
+
+
+async def process_user_request(user_message, user_name, bot, sent_message):
+    try:
+        response_language = detect_response_language(user_message)
+        system_message = (
+            "Ти Telegram-бот, створений для відповіді на запитання про ІТ Степ Університет. "
+            "Твоє завдання: "
+            "1. Оціни релевантність запитання користувача стосовно університету."
+            "2. Якщо запитання стосується університету, знайди відповідь, використовуючи текст із Google Docs."
+            "3. Якщо запитання стосується університету, але ти не маєш на нього відповіді, відповідай що не маєш такої "
+            "інформації, тобі не потрібно казати, що запитання користувача стосується університету."
+            f"Відповідай {response_language} мовою. Ось текст документа для використання: {txt_content}. "
+            f"Запитання користувача: {user_message}"
+        )
+        messages = [
+            {"role": "system", "content": system_message},
+            {"role": "user", "content": user_message}
+        ]
+
+        # Виклик OpenAI API в окремому потоці
+        response = await asyncio.to_thread(
+            openai.chat.completions.create,
+            model="gpt-4o-mini",
+            messages=messages
+        )
+        reply = response.choices[0].message.content.strip()
+        print(f"Відповідь бота: {reply}")
+
+        # Форматування відповіді
+        safe_reply = format_markdown_v2(reply)
+
+        # Надсилання відповіді
+        await bot.edit_message_text(
+            chat_id=sent_message.chat_id,
+            message_id=sent_message.message_id,
+            text=safe_reply,
+            parse_mode=ParseMode.MARKDOWN_V2
+        )
+
+        # Логування запиту
+        await log_to_db(user_name, user_message, reply)
+
+    except Exception as e:
+        print(f"Помилка: {str(e)}")
+        await bot.edit_message_text(
+            chat_id=sent_message.chat_id,
+            message_id=sent_message.message_id,
+            text=f"Помилка: {str(e)}"
+        )
 
 
 # Команда /start
@@ -110,48 +148,11 @@ async def analyze(update: Update, context):
     user_name = update.message.from_user.username or "Anonymous"
     print(f"Запит користувача (@{user_name}): {user_message}")
 
-    try:
-        response_language = detect_response_language(user_message)
-        system_message = (
-            "Ти Telegram-бот, створений для відповіді на запитання про ІТ Степ Університет. "
-            "Твоє завдання: "
-            "1. Оціни релевантність запитання користувача стосовно університету. "
-            "2. Якщо запитання стосується університету, знайди відповідь, використовуючи текст із Google Docs. "
-            f"Відповідай {response_language} мовою. Ось текст документа для використання: {txt_content}. "
-            f"Запитання користувача: {user_message}"
-        )
-        messages = [
-            {"role": "system", "content": system_message},
-            {"role": "user", "content": user_message}
-        ]
+    bot = context.bot
+    sent_message = await update.message.reply_text("Запит прийнято. Очікуйте...")
 
-        bot = context.bot
-        sent_message = await update.message.reply_text("Запит прийнято. Очікуйте...")
-
-        response = openai.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=messages
-        )
-        reply = response.choices[0].message.content.strip()
-        print(f"Відповідь бота: {reply}")
-
-        # Форматування відповіді перед відправленням
-        safe_reply = format_markdown_v2(reply)
-
-        # Надсилання відформатованої відповіді
-        await bot.edit_message_text(
-            chat_id=sent_message.chat_id,
-            message_id=sent_message.message_id,
-            text=safe_reply,
-            parse_mode=ParseMode.MARKDOWN_V2
-        )
-
-        # Запис у базу даних
-        log_to_db(user_name, user_message, reply)
-
-    except Exception as e:
-        print(f"Помилка: {str(e)}")
-        await update.message.reply_text(f"Помилка: {str(e)}")
+    # Створення окремого завдання для обробки запиту
+    asyncio.create_task(process_user_request(user_message, user_name, bot, sent_message))
 
 
 # Основна функція запуску бота
