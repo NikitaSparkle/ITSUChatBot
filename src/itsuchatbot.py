@@ -1,17 +1,18 @@
 import os
 import re
-from difflib import SequenceMatcher
+from pymongo import MongoClient
 from googleapiclient.discovery import build
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
 import pickle
+from datetime import datetime, timezone
 
 from telegram import Update, Bot
 from telegram.constants import ParseMode
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters
 from openai import OpenAI
 
-from src.keys import openAI_api, tg_bot_token, GOOGLE_DOC_ID
+from src.keys import openAI_api, tg_bot_token, GOOGLE_DOC_ID, MONGO_URI
 
 # OpenAI API Key
 openai = OpenAI(api_key=openAI_api)
@@ -19,9 +20,15 @@ openai = OpenAI(api_key=openAI_api)
 # Telegram Bot Token
 BOT_TOKEN = tg_bot_token
 
+# MongoDB налаштування
+client = MongoClient(MONGO_URI)
+db = client["ITSUChatBot"]  # Ім'я бази даних
+logs_collection = db["logs"]  # Колекція logs
+
 # Google Docs API налаштування
 SCOPES = ['https://www.googleapis.com/auth/documents.readonly']
 GOOGLE_DOC_ID = GOOGLE_DOC_ID  # Замініть на ваш Google Doc ID
+
 
 def get_google_doc_content(doc_id):
     """Зчитує текст із Google Docs."""
@@ -51,8 +58,10 @@ def get_google_doc_content(doc_id):
                     content += text_element['textRun']['content']
     return content
 
+
 # Завантаження тексту з Google Docs
 txt_content = get_google_doc_content(GOOGLE_DOC_ID)
+
 
 # Визначення мови відповіді
 def detect_response_language(user_message: str) -> str:
@@ -62,24 +71,43 @@ def detect_response_language(user_message: str) -> str:
 
 
 def format_markdown_v2(reply: str) -> str:
-    # Екранування спеціальних символів для Telegram Markdown v2
+    """
+    Форматує текст для Telegram Markdown v2, замінюючи ** на *, а також екранує спеціальні символи.
+    """
+    # Екранування спеціальних символів Telegram Markdown v2
     special_characters = r"_*[]()~`>#+-=|{}.!"
     for char in special_characters:
         reply = reply.replace(char, f"\\{char}")
-    # Замінюємо **текст** на формат Telegram Markdown v2 для жирного тексту
+
+    # Заміна `**текст**` на `*текст*` для жирного тексту в Telegram
     reply = re.sub(r"\*\*(.+?)\*\*", r"*\1*", reply)
+
+    # Заміна неправильного форматування, наприклад, подвійних пробілів після заміни
+    reply = reply.replace(" *", " *").replace("* ", "* ").strip()
+
     return reply
 
+
+# Функція для запису логів у базу даних
+def log_to_db(user_name, user_question, ai_answer):
+    log_entry = {
+        "user_name": user_name,
+        "user_question": user_question,
+        "ai_answer": ai_answer,
+        "datetime": datetime.now(timezone.utc)  # Використовуємо timezone-aware datetime
+    }
+    logs_collection.insert_one(log_entry)
 
 
 # Команда /start
 async def start(update: Update, context):
     await update.message.reply_text("Привіт! Я бот IT Step University. Надайте запитання, яке стосується університету.")
 
+
 # Обробка тексту від користувача
 async def analyze(update: Update, context):
     user_message = update.message.text
-    user_name = update.message.from_user.username
+    user_name = update.message.from_user.username or "Anonymous"
     print(f"Запит користувача (@{user_name}): {user_message}")
 
     try:
@@ -107,17 +135,24 @@ async def analyze(update: Update, context):
         reply = response.choices[0].message.content.strip()
         print(f"Відповідь бота: {reply}")
 
-        # Відправка відформатованої відповіді
+        # Форматування відповіді перед відправленням
+        safe_reply = format_markdown_v2(reply)
+
+        # Надсилання відформатованої відповіді
         await bot.edit_message_text(
             chat_id=sent_message.chat_id,
             message_id=sent_message.message_id,
-            text=format_markdown_v2(reply),  # Використовуємо форматування
+            text=safe_reply,
             parse_mode=ParseMode.MARKDOWN_V2
         )
+
+        # Запис у базу даних
+        log_to_db(user_name, user_message, reply)
 
     except Exception as e:
         print(f"Помилка: {str(e)}")
         await update.message.reply_text(f"Помилка: {str(e)}")
+
 
 # Основна функція запуску бота
 def main():
@@ -127,6 +162,7 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, analyze))
 
     app.run_polling()
+
 
 if __name__ == "__main__":
     main()
