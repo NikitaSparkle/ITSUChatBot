@@ -3,4 +3,4 @@ pymongo==4.7.0
 google-api-python-client==2.92.0
 google-auth==2.23.4
 google-auth-oauthlib==1.0.0
-openai==0.27.8
+openai==1.56.0
