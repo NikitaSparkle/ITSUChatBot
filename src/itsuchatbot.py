@@ -68,14 +68,17 @@ def detect_response_language(user_message: str) -> str:
         return "uk"  # Українська
     return "en"  # Англійська
 
-
+# Форматує текст для Telegram Markdown V2
 def format_markdown_v2(reply: str) -> str:
-    special_characters = r"_*[]()~`>#+-=|{}.!"
+    # Екранування спеціальних символів Telegram Markdown V2
+    special_characters = r"_[]()~`>#+-=|{}.!"
     for char in special_characters:
         reply = reply.replace(char, f"\\{char}")
-    reply = re.sub(r"\*\*(.+?)\*\*", r"*\1*", reply)
-    return reply
 
+    # Заміна **текст** на *текст* для жирного тексту
+    reply = re.sub(r"\*\*(.+?)\*\*", r"*\1*", reply)
+
+    return reply
 
 async def log_to_db(user_name, user_question, ai_answer):
     log_entry = {
@@ -86,7 +89,7 @@ async def log_to_db(user_name, user_question, ai_answer):
     }
     await asyncio.to_thread(logs_collection.insert_one, log_entry)
 
-
+# Виклик OpenAI API в окремому потоці
 async def process_user_request(user_message, user_name, bot, sent_message):
     try:
         response_language = detect_response_language(user_message)
@@ -105,7 +108,6 @@ async def process_user_request(user_message, user_name, bot, sent_message):
             {"role": "user", "content": user_message}
         ]
 
-        # Виклик OpenAI API в окремому потоці
         response = await asyncio.to_thread(
             openai.chat.completions.create,
             model="gpt-4o-mini",
@@ -114,10 +116,7 @@ async def process_user_request(user_message, user_name, bot, sent_message):
         reply = response.choices[0].message.content.strip()
         print(f"Відповідь бота: {reply}")
 
-        # Форматування відповіді
         safe_reply = format_markdown_v2(reply)
-
-        # Надсилання відповіді
         await bot.edit_message_text(
             chat_id=sent_message.chat_id,
             message_id=sent_message.message_id,
