@@ -1,37 +1,36 @@
 import os
 import re
 from pymongo import MongoClient
-from googleapiclient.discovery import build
-from google_auth_oauthlib.flow import InstalledAppFlow
-from google.auth.transport.requests import Request
-import pickle
 from datetime import datetime, timezone
 import asyncio
 
 from telegram import Update, Bot
 from telegram.constants import ParseMode
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters
-from openai import OpenAI
+import openai
+from llama_index.core import VectorStoreIndex, Document
 
 from src.keys import openAI_api, tg_bot_token, GOOGLE_DOC_ID, MONGO_URI
 
-# OpenAI API Key
-openai = OpenAI(api_key=openAI_api)
+# Встановлення API-ключа OpenAI
+openai.api_key = openAI_api
 
-# Telegram Bot Token
+# Токен Telegram-бота
 BOT_TOKEN = tg_bot_token
 
-# MongoDB налаштування
+# Налаштування MongoDB
 client = MongoClient(MONGO_URI)
 db = client["ITSUChatBot"]
 logs_collection = db["logs"]
 
-# Google Docs API налаштування
-SCOPES = ['https://www.googleapis.com/auth/documents.readonly']
-GOOGLE_DOC_ID = GOOGLE_DOC_ID
-
-
+# Завантаження тексту з Google Docs
 def get_google_doc_content(doc_id):
+    from googleapiclient.discovery import build
+    from google_auth_oauthlib.flow import InstalledAppFlow
+    from google.auth.transport.requests import Request
+    import pickle
+
+    SCOPES = ['https://www.googleapis.com/auth/documents.readonly']
     creds = None
     if os.path.exists('../token.pickle'):
         with open('../token.pickle', 'rb') as token:
@@ -58,28 +57,37 @@ def get_google_doc_content(doc_id):
                     content += text_element['textRun']['content']
     return content
 
+# Створення індексу з тексту
+def build_index_from_text(content):
+    documents = [Document(text=content)]
+    index = VectorStoreIndex.from_documents(documents)
+    return index
+
+# Завантаження документа з Google Docs та створення індексу
+txt_content = get_google_doc_content(GOOGLE_DOC_ID)
+index = build_index_from_text(txt_content)
+
+# Створення об'єкта QueryEngine
+query_engine = index.as_query_engine()
 
 # Завантаження тексту з Google Docs
-txt_content = get_google_doc_content(GOOGLE_DOC_ID)
+google_doc_full_content = get_google_doc_content(GOOGLE_DOC_ID)
 
-
+# Визначення мови відповіді
 def detect_response_language(user_message: str) -> str:
     if re.search(r"[а-яіїєґ]", user_message.lower()):  # Кирилиця
         return "uk"  # Українська
     return "en"  # Англійська
 
-# Форматує текст для Telegram Markdown V2
+# Форматування тексту для Telegram Markdown V2
 def format_markdown_v2(reply: str) -> str:
-    # Екранування спеціальних символів Telegram Markdown V2
     special_characters = r"_[]()~`>#+-=|{}.!"
     for char in special_characters:
         reply = reply.replace(char, f"\\{char}")
-
-    # Заміна **текст** на *текст* для жирного тексту
     reply = re.sub(r"\*\*(.+?)\*\*", r"*\1*", reply)
-
     return reply
 
+# Логування запитів у базу даних
 async def log_to_db(user_name, user_question, ai_answer):
     log_entry = {
         "user_name": user_name,
@@ -89,18 +97,24 @@ async def log_to_db(user_name, user_question, ai_answer):
     }
     await asyncio.to_thread(logs_collection.insert_one, log_entry)
 
-# Виклик OpenAI API в окремому потоці
+
+# Виклик OpenAI API в окремому потоці з інтеграцією LlamaIndex
 async def process_user_request(user_message, user_name, bot, sent_message):
     try:
+        # Пошук релевантного контексту через QueryEngine
+        response = query_engine.query(user_message)
+        relevant_context = response.response  # Відповідь від LlamaIndex
+
         response_language = detect_response_language(user_message)
         system_message = (
             "Ти Telegram-бот, створений для відповіді на запитання про ІТ Степ Університет. "
             "Твоє завдання: "
-            "1. Оціни релевантність запитання користувача стосовно університету."
-            "2. Якщо запитання стосується університету, знайди відповідь, використовуючи текст із Google Docs."
-            "3. Якщо запитання стосується університету, але ти не маєш на нього відповіді, відповідай що не маєш такої "
-            "інформації, тобі не потрібно казати, що запитання користувача стосується університету."
-            f"Відповідай {response_language} мовою. Ось текст документа для використання: {txt_content}. "
+            "1. Оціни релевантність запитання користувача стосовно університету. "
+            "2. Якщо запитання стосується університету, знайди відповідь, використовуючи наданий текст. "
+            "3. Якщо запитання стосується університету, але ти не маєш на нього відповіді, відповідай, що не маєш такої інформації. "
+            f"Відповідай {response_language} мовою."
+            f"Ось релевантний текст для використання: {relevant_context}. "
+            f"Ось повний текст документа для контексту: {google_doc_full_content}. "
             f"Запитання користувача: {user_message}"
         )
         messages = [
@@ -135,34 +149,24 @@ async def process_user_request(user_message, user_name, bot, sent_message):
             text=f"Помилка: {str(e)}"
         )
 
-
 # Команда /start
 async def start(update: Update, context):
     await update.message.reply_text("Привіт! Я бот IT Step University. Надайте запитання, яке стосується університету.")
-
 
 # Обробка тексту від користувача
 async def analyze(update: Update, context):
     user_message = update.message.text
     user_name = update.message.from_user.username or "Anonymous"
-    print(f"Запит користувача (@{user_name}): {user_message}")
-
     bot = context.bot
     sent_message = await update.message.reply_text("Запит прийнято. Очікуйте...")
-
-    # Створення окремого завдання для обробки запиту
     asyncio.create_task(process_user_request(user_message, user_name, bot, sent_message))
-
 
 # Основна функція запуску бота
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
-
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, analyze))
-
     app.run_polling()
-
 
 if __name__ == "__main__":
     main()
