@@ -158,12 +158,17 @@ async def analyze(update: Update, context):
 def home():
     return "Бот працює!"
 
-
 @app.route(f"/{BOT_TOKEN}", methods=["POST"])
 async def webhook():
-    update = Update.de_json(request.get_json(), Bot(token=BOT_TOKEN))
-    await application.process_update(update)
-    return "OK", 200
+    try:
+        data = request.get_json()
+        print(f"Received data: {data}")
+        update = Update.de_json(data, Bot(token=BOT_TOKEN))
+        await application.process_update(update)
+        return "OK", 200
+    except Exception as e:
+        print(f"Error handling Webhook: {e}")
+        return "Internal Server Error", 500
 
 # Ініціалізація додатку
 application = Application.builder().token(BOT_TOKEN).build()

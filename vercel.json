@@ -1,15 +1,9 @@
 {
   "version": 2,
   "builds": [
-    {
-      "src": "itsuChatBotHost.py",
-      "use": "@vercel/python"
-    }
+    { "src": "itsuChatBotHost.py", "use": "@vercel/python" }
   ],
   "routes": [
-    {
-      "src": "/(.*)",
-      "dest": "itsuChatBotHost.py"
-    }
+    { "src": "/.*", "dest": "itsuChatBotHost.py" }
   ]
 }
