@@ -154,7 +154,11 @@ async def analyze(update: Update, context):
     reply = await process_user_request(user_message, user_name)
     await update.message.reply_text(reply, parse_mode=ParseMode.MARKDOWN_V2)
 
-# Вебхук для Telegram
+@app.route("/", methods=["GET"])
+def home():
+    return "Бот працює!"
+
+
 @app.route(f"/{BOT_TOKEN}", methods=["POST"])
 async def webhook():
     update = Update.de_json(request.get_json(), Bot(token=BOT_TOKEN))
