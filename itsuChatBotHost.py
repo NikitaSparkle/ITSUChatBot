@@ -19,6 +19,7 @@ BOT_TOKEN = os.getenv("TG_BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 MONGO_URI = os.getenv("MONGO_URI")
 GOOGLE_DOC_ID = os.getenv("GOOGLE_DOC_ID")
+GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS_JSON")
 
 # Ініціалізація OpenAI API
 openai.api_key = OPENAI_API_KEY
